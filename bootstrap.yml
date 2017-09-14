@@ -1,0 +1,18 @@
+# code_snippet springApplicationName start
+spring:
+  application:
+    name: kattia-company
+# code_snippet springApplicationName end
+  cloud:
+    config:
+      uri: ${vcap.services.config-repo.credentials.uri}
+
+management:
+  security:
+    enabled: false
+
+security:
+  basic:
+    enabled: false
+    
+    
