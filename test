@@ -1,0 +1,201 @@
+' ZZLACOUB - Run for HARBOR and HDH
+'
+'
+'Input:
+'     zpMediaType - Media Type
+'     zpFacilityLayout - Facility
+'
+'Output:
+'      N/A
+'
+' USCB INC.
+' All rights reserved
+' syWFAction
+'
+' Example:
+'     N/A
+'
+' Modification User          Date           Case         Reason
+'--------------------------------------------------------------------------------------------------
+' OSC                        10/16/2012                  Created
+' OSC                        02/28/2013                  Modified field positions for HDH and MLK
+' ABach                      07/25/2013                  Modified to remove Sequence 2 and 3 for LACOUB'
+' LNH                        12/10/2013                  Modified to use new ZZENMRN field
+' LNH                        12/20/2013                  HCACPAYFAXLNH - Modified info saved to ZZIMPORTREJECTS table'
+' abarakat                   01/22/2014                  Modified to Create the correct Payers
+' abarakat                   01/27/2014                  Modified for hcacinsured and Middile Name.
+' ANCHAL                     07/03/2014                  Modifications for zzmissinginfo table task-403
+' Anchal                     07/29/2014                  Modification for the clrhouse in HCACCOUNT task-431
+' abarakat                   01/06/2014                  Modified to set the DOB Appropriately.
+' abarakat                   05/21/2015                  Modified to set the ZZENCLTHSYS and the currentpayer from line 42
+' abarakat                   12/29/2014                  Modifcation to read claim line info and pay to address.' Anchal-We are getting payerName,address,city,state,zip for the account tabel from txt.
+' aprashar                   07/07/2015                  Mapping payer at line 42,43 as well in case no payer found at line 4
+' aprashar                   08/07/2015                  Modify logic to set primary contact info;
+' aprashar                   12/14/2015                  Modify logic to set ZZENCLTHSYS
+' jamiller                   01/27/2016                  Added relationship between HCENPTACCT and zvPtAcct to fix ZZPADMRN comparison for pad length
+' jamiller                   02/10/2017                  Strip  all apecial char from zip 802
+' jamiller                   06/13/2017                  Updated script to include payer 636 in account creation
+' jamiller                   08/08/2017                  Update to correct adm/dsc time loading errors
+' jamiller                   10/25/2017                  Updated script to prevent load of encounter if secondary payer is 301 or 481
+' jamiller                   11/07/2017                  Updated script to call subroutine to create a PB account when HB account is being rejected for high dollar value.
+' dhandy                     11/16/2017                  Modified rejection of >100k accounts to create a PB encounter with 0 balance and zero out and COMPLETE the HB encounter
+' jamiller                   07/23/2018                  Updated script to review IP/HMS account and reject if in existence; also updated to auto-close any account containing ERADMADT as HCENATTENDPHY
+' dhandy                     08/10/2018                  Added the writing of the ZZHCPPSCODE field on line 55. Admit DX code writes for both OP and IP now.
+' dhandy                     08/22/2018                  Add the writing of the ZZCIRATE field
+' jamiller                   09/25/2018                  Updated to auto-close the records if the doctor is sent as GENERIC,NURSING,NURSE, or ERADMADT
+' dhandy                     11/12/2018         2048     Changed auto close of generic, nursing, and nurse close reason to PMTPRIOR from REFERROR
+' dhandy                     12/27/2018                  Added close as OTHERVEND instead of PMTPRIOR
+' wkwan                      01/09/2019         2522     Set LACO Payer Name from HCPAYER table instead of client's file (Case 42)
+' dhandy                     01/25/2019                  Remove MRN Check when searching for duplicate.
+' wkwan                      03/11/2019         4428     Setting Current Payer from Payer ID (like LACO524) not HCACPAYNAME (like BLUE CROSS) (Case 42)
+' wkwan                      04/19/2019         5350     Closing HB account as OTHERVEND if bal > 100K and admit date before 10/01/2017 [see after the Sub ZeroHBAccount.]
+' dhandy                     04/25/2019     2019 BO      Changed the laco reject script calls to the ZZIMPORTREJECTS script call. Changed ZZIMPORTRUN write to call script ZZIMPORTRUNSET.
+' dhandy                     05/24/2019                     Added patient type table to check if patient type exists first. If it does not, then it sets it to a default value.
+'
+Begin Declare
+	Shared zvFile  As syFile                           ' Service used to read the UB file
+	Shared zvPBFound As Number
+	zvError As Chr                              ' Not used in script, but required by ZZPARSEFN
+	zvData  As Chr                              ' Line read in by the file service
+	ZVENSTMTFROMDATE As Date                       ' TRY TO TEST IT AS A NUMBER
+	ZVENSTMTTODATE As Date
+	ZVENDSCDTE As Date
+	ZVAUGFirst As Date
+	ZVENADMDTE As Date
+	zvLineCnt As Number                         ' Counts line for group.  Resets with each form feed
+	zvGrpCnt  As Number                         ' Counts the number of encounters processed
+	zvSkip As Number                            ' Variable to track if we should bypass all remaining lines in the group
+	zvENFound  As Number                        ' Variable to identify if patient account number and MRN is already found for Facility
+	zvPtFacIdx As syIndex.HCENPTFC              ' Patient Account/Facility Index
+	zvProviderName As Chr                       ' Facility name
+	zvPTAcct   As Chr                           ' Patient account number
+	zvMRN      As Chr                           ' Medical record number
+	zvBillType As Chr                           ' Bill type
+	zvRevCode  As Chr                           ' Revenue code
+	zvSrvDte As Date                            ' Service date
+	zvPtType As Chr                             ' Patient type
+	zvPNFullName   As Chr                       ' Person name
+	zvPNFirstName  As Chr                       ' Person first name
+	zvPNLastName   As Chr                       ' Person last name
+	zvPNMiddleName As Chr                       ' Person middle name
+	zvPNAdr1       As Chr                       ' Person address
+	zvPNCity       As Chr                       ' Person city
+	zvPNState      As Chr                       ' Person state
+	zvPNZip        As Chr                       ' Person zip
+	zvPNDOB        As Chr                       ' Person date of birth
+	zvPNGender     As Chr                       ' Person gender
+	zvFacility   As syTabRec.HCFACILITY         ' Facility record
+	zvENTabRec   As syTabRec.HCENCOUNTER        ' Encounter record
+	zvACCPTabRec As syTabRec.HCACCOUNT          ' Current Payer record
+	zvACINSTabRec As syTabRec.HCACCOUNT          ' Payer seq2,seq3
+	zvAC99TabRec As syTabRec.HCACCOUNT          ' Tertiary Payer record
+	zvPNTabRec   As syTabRec.HCPERSON           ' Person record
+	zvCLITabRec  As syTabRec.HCCLAIMLINEITEM    ' Claim Line Item Detail record
+	zvACIdx    As syIndex.HCACENCNTRID
+	zvPayerIdx  As syIndex.ZZCNVPYR
+	zvPayerConv As syTabRec.ZZCNVPAYER
+	zvPayer As syTabRec.HCPAYER
+	zvActRec As syTabRec.HCACCOUNT
+	zvPatientType As syTabRec.HCPTTYPE
+	zvPayerTmp As Chr
+	zvPayerFnd  As Chr
+	zvPayerFnd1 As Chr
+	zvPayerFnd2 As Chr
+	zvAdr1      As Chr
+	zvAdr2      As Chr
+	zvPieces As Number
+	zvEnhsys As Chr
+	zvGovermentReject As Number
+	GOVPYR As Chr                    'Client gov. payer code
+	zvTabPay As syTabRec.ZZPAYTOADR
+	zvIdxPay As syIndex.PYTOAD
+	zvSEQNUM As Number
+	zvINSNAME As Chr
+	zvADDINFO As Chr
+	zvACADDR As Chr
+	zvACADDR1 As Chr
+	zvACADDR3 As Chr
+	zvACADZIP4 As Chr
+	zvACADST5 As Chr
+	zvACADCT6 As Chr
+	zvOrigBal As Number
+	zvLineChg As Number
+	zvImportRun    As syTabRec.ZZIMPORTRUN          ' Set up Variables for ZZIMPORTRUN write
+	zvRecCount     As Number
+	zvFileType     As Chr
+	zvImportRunId  As Chr
+	zvOthrSqncPyr As Chr
+	zvSeqId As Number
+	zvSeq2Id As Number
+	zvSeq3Id As Number
+	zvThreshold As Number
+	zvSetStatus As syWFAction.HCSETSTATUS
+	zvClose As SyWFAction.ZZCLOSE
+	OUTFILE As SYFILE
+	
+	zvSeq1InsuredID As Chr
+	zvSeq2InsuredID As Chr
+	zvSeq3InsuredID As Chr
+	
+
+End Declare
+
+Begin Main
+	Set zvLineCnt = 0
+	Set zvGrpCnt  = 0
+	Set zvGovermentReject= 0
+	Set zvRecCount = 0
+	Set zvThreshold = 100000
+	
+	Set zvFile.FileName = "\\faprod.uscbinc.com\gdrive\artivahealthcare\stage\test.txt" 'locating the file name
+	Gosub ExportFile
+	If $$zvFile.Open() Then 'Open the file
+		Audit("Beginning import for "_zvFile.FileName)
+		Call zvFile.Read(zvData)'Read the first line.  Read will use record terminator specified on Media Type to determine how far to read
+		While (Not zvFile.EOF)'Continue until we've reached the end of the file
+			If zvData [ $$SYCHAR(12) Then ' Reset to first line if FF (New Page/Form Feed character is found)  If this is the first line in the file, increment Line Count from 0 to 0+1 in Else
+				Set zvData = $$TRANS(zvData,$$SYCHAR(12),"")
+				Set zvLineCnt = 1
+			Else
+				Set zvLineCnt = zvLineCnt + 1
+			End If
+			If zvLineCnt = 1 Then' If first line of group, then increment group number
+				Set zvGrpCnt = zvGrpCnt + 1
+				Set zvSkip = 0
+			End If
+			Gosub ProcessLine'Line specific logic
+			
+			Call zvFile.Read(zvData)'Read the next line in the file
+		End While
+
+	Else
+		Audit ("File could not be opened:"_zvFile.filename)
+		Set LBRETURN = 0
+	End If
+
+End Main
+
+Begin Sub ProcessLine
+	If Not zvSkip Then ' Process each line of Group if it is not being skipped
+		Select zvLineCnt
+			Case 1
+				Set zvProviderName = $$SYSTRIPALL($$EXTRACT(zvData,1,52))
+				Set zvPTAcct = $$TRANS($$HCSTRIPALL($$EXTRACT(zvData,54,64)),$$SYCHAR(13),"")
+				Set zvRecCount = zvRecCount +1  
+			Case 46   ' Insured Information 1
+				Set zvSeq1InsuredID  = $$SYSTRIPALL($$EXTRACT(zvData,30,49))
+			Case 47
+				Set zvSeq2InsuredID  = $$SYSTRIPALL($$EXTRACT(zvData,30,49)) 
+			Case 48   ' Insured Information 2' Insured Information 3   --same for zvAC03TabRec
+				Set zvSeq3InsuredID = $$SYSTRIPALL($$EXTRACT(zvData,30,49)) 	
+				Call OUTFILE.WRITE(zvPTAcct_","_zvProviderName_","_zvSeq1InsuredID_","_zvSeq2InsuredID_","_zvSeq3InsuredID)
+		End Select
+				
+	End If   ' End of Skip Check
+End Sub ProcessLine
+
+Begin Sub ExportFile
+	Set OUTFILE.FILENAME = "\\faprod.uscbinc.com\gdrive\artivahealthcare\stage\"_$$FMTDATE($$TODAY(),"MMDDYYYY")_"_UB04InsuredID.txt"
+	Set OUTFILE.TERM = "CR,LF"
+	Call OUTFILE.CREATE()
+End Sub ExportFile
